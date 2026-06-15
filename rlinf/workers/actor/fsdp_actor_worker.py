@@ -1184,6 +1184,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "reward_type": self.cfg.algorithm.reward_type,
             "loss_mask": self.rollout_batch.get("loss_mask", None),
             "loss_mask_sum": self.rollout_batch.get("loss_mask_sum", None),
+            "normalize_returns": self.cfg.algorithm.get("normalize_returns", False),
         }
 
         advantages_and_returns = calculate_adv_and_returns(**kwargs)
@@ -1369,6 +1370,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     elif SupportedModel(self.cfg.actor.model.model_type) in [
                         SupportedModel.GR00T,
                         SupportedModel.GR00T_N1D6,
+                        SupportedModel.GR00T_N1D7,
                         SupportedModel.ABOT_M0,
                     ]:
                         kwargs["prev_logprobs"] = prev_logprobs
@@ -1390,6 +1392,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     if SupportedModel(self.cfg.actor.model.model_type) in [
                         SupportedModel.GR00T,
                         SupportedModel.GR00T_N1D6,
+                        SupportedModel.GR00T_N1D7,
                         SupportedModel.ABOT_M0,
                     ]:
                         prev_logprobs = output_dict["prev_logprobs"]
@@ -1418,6 +1421,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     }
                     if SupportedModel(self.cfg.actor.model.model_type) in [
                         SupportedModel.GR00T_N1D6,
+                        SupportedModel.GR00T_N1D7,
                     ]:
                         kwargs["clip_ratio_c"] = self.cfg.algorithm.get(
                             "clip_ratio_c", 3.0

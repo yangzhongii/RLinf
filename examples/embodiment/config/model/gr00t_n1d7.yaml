@@ -1,0 +1,49 @@
+model_type: "gr00t_n1d7"
+
+# Model precision and loading settings
+precision: "bf16"
+trust_remote_code: True
+is_lora: false
+
+# Action and policy settings (LIBERO N1.7 defaults; auto_infer_* overrides from checkpoint)
+action_dim: 7
+num_action_chunks: 8
+denoising_steps: 4
+
+# obs_converter_type selects an entry in
+# ``rlinf.models.embodiment.gr00t_n1d7.simulation_io`` (OBS_CONVERSION /
+# ACTION_CONVERSION).
+obs_converter_type: "libero"
+
+# LIBERO N1.7: processor key ``libero_sim`` (LeRobot #3709). SO-101 IsaacLab: use
+# ``embodiment_tag: so101``, ``obs_converter_type: isaaclab_stack_cube``, and set
+# ``auto_infer_embodiment_tag: false`` in the task YAML.
+embodiment_tag: libero_sim
+use_official_libero_sim: true
+auto_infer_embodiment_tag: true
+auto_infer_action_chunks: true
+
+# Path to Gr00tN1d7Processor assets (processor_config.json, statistics.json,
+# embodiment_id.json). Null uses model_path.
+processor_path: null
+
+add_value_head: True
+
+rl_head_config:
+  joint_logprob: False
+  noise_method: "flow_sde"
+  ignore_last: False
+  safe_get_logprob: False
+  noise_anneal: False
+  noise_params: [0.7, 0.3, 400]
+  noise_level: 0.5
+  action_noise_scale: 0.1
+  add_value_head: ${actor.model.add_value_head}
+  chunk_critic_input: False
+  detach_critic_input: True
+  disable_dropout: True
+  use_vlm_value: False
+  value_vlm_mode: "mean_token"
+  padding_value: 570
+
+num_steps: 4
