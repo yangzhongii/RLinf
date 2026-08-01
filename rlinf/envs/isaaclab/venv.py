@@ -29,10 +29,12 @@ def _torch_worker(
     reset_idx_queue: mp.Queue,
 ):
     parent_remote.close()
-    env_fn = env_fn_wrapper.x
-    isaac_env, sim_app = env_fn()
-    device = isaac_env.device
+    isaac_env = None
+    sim_app = None
     try:
+        env_fn = env_fn_wrapper.x
+        isaac_env, sim_app = env_fn()
+        device = isaac_env.device
         while True:
             try:
                 cmd = child_remote.recv()
@@ -62,13 +64,20 @@ def _torch_worker(
             else:
                 child_remote.close()
                 raise NotImplementedError
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, Exception) as e:
         child_remote.close()
+        print(f"[IsaacLabEnvWorker] Terminated: {e}", flush=True)
     finally:
-        try:
-            isaac_env.close()
-        except Exception as e:
-            print(f"IsaacLab Env Closed with error: {e}")
+        if isaac_env is not None:
+            try:
+                isaac_env.close()
+            except Exception as e:
+                print(f"[IsaacLabEnvWorker] Env close error: {e}", flush=True)
+        if sim_app is not None:
+            try:
+                sim_app.close()
+            except Exception as e:
+                print(f"[IsaacLabEnvWorker] SimApp close error: {e}", flush=True)
 
 
 class SubProcIsaacLabEnv:
@@ -93,24 +102,55 @@ class SubProcIsaacLabEnv:
         self.isaac_lab_process.start()
         self.child_remote.close()
 
+    def _check_child_alive(self):
+        """Check if the child process is still alive; raise if it died unexpectedly."""
+        if not self.isaac_lab_process.is_alive():
+            exitcode = self.isaac_lab_process.exitcode
+            raise RuntimeError(
+                f"IsaacLab Env Worker (pid={self.isaac_lab_process.pid}) "
+                f"died unexpectedly with exit code {exitcode}. "
+                f"Check the logs for errors during IsaacSim initialization."
+            )
+
     def reset(self, seed=None, env_ids=None):
+        self._check_child_alive()
         self.parent_remote.send("reset")
         self.reset_idx.put((env_ids, seed))
-        obs, info = self.obs_queue.get()
+        try:
+            obs, info = self.obs_queue.get(timeout=300)
+        except Exception:
+            self._check_child_alive()
+            raise RuntimeError(
+                "Timeout waiting for IsaacLab Env Worker to complete reset(). "
+                "The child process may have crashed during IsaacSim initialization."
+            )
         return obs, info
 
     def step(self, action: torch.Tensor):
         """
         action : (bs, action_dim)
         """
+        self._check_child_alive()
         self.parent_remote.send("step")
         self.action_queue.put(action)
-        env_step_result = self.obs_queue.get()
+        try:
+            env_step_result = self.obs_queue.get(timeout=300)
+        except Exception:
+            self._check_child_alive()
+            raise RuntimeError(
+                "Timeout waiting for IsaacLab Env Worker to complete step(). "
+                "The child process may have crashed during IsaacSim execution."
+            )
         return env_step_result
 
     def close(self):
-        self.parent_remote.send("close")
-        self.isaac_lab_process.join()
+        if not self.isaac_lab_process.is_alive():
+            return
+        try:
+            self.parent_remote.send("close")
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+        self.isaac_lab_process.join(timeout=10)
         self.isaac_lab_process.terminate()
 
     def device(self):

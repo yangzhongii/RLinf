@@ -76,8 +76,15 @@ class Collective:
             worker_info = self._worker_manager.get_worker_info(worker_address)
             count += 1
             if count % Cluster.TIMEOUT_WARN_TIME == 0:
+                seconds_waited = count / 1000
                 self._logger.warning(
-                    f"Waited {count / 1000} seconds for worker {worker_address.get_name()} to be ready..."
+                    f"Waited {seconds_waited} seconds for worker {worker_address.get_name()} to be ready..."
+                )
+            if count >= Cluster.TIMEOUT_WARN_TIME * 10:
+                raise TimeoutError(
+                    f"Timed out after {count / 1000} seconds waiting for worker "
+                    f"{worker_address.get_name()} to be ready. The worker may have failed "
+                    f"to initialize or the WorkerManager may be unresponsive."
                 )
         return worker_info
 
@@ -90,7 +97,14 @@ class Collective:
             group_info = self._coll_manager.get_collective_group(group_name)
             count += 1
             if count % Cluster.TIMEOUT_WARN_TIME == 0:
+                seconds_waited = count / 1000
                 self._logger.warning(
-                    f"Waited {count // 1000} seconds for collective group {group_name} to be ready..."
+                    f"Waited {seconds_waited} seconds for collective group {group_name} to be ready..."
+                )
+            if count >= Cluster.TIMEOUT_WARN_TIME * 10:
+                raise TimeoutError(
+                    f"Timed out after {count / 1000} seconds waiting for collective group "
+                    f"{group_name} to be registered. The master worker may have failed "
+                    f"to register the group, or the CollectiveManager may be unresponsive."
                 )
         return group_info
