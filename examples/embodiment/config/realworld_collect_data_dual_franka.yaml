@@ -1,0 +1,135 @@
+# Dual-arm SpaceMouse teleop collection on DualFrankaTCPEnv-v1.
+#
+# Two SpaceMice (pyspacemouse device indices 0 and 1) each control one Franka.
+# The SpaceMouseExpert axis mapping is already robot-base-frame, so no adjoint
+# transform is applied. Left mouse button closes the gripper, right opens.
+# Run:
+#   bash examples/embodiment/collect_data.sh realworld_collect_data_dual_franka
+defaults:
+  - env/realworld_dual_franka_tcp_rot6d@env.eval
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  # Single workstation: env worker + both FrankaControllers share one node.
+  num_nodes: 1
+  component_placement:
+    env:
+      node_group: franka
+      placement: 0
+  node_groups:
+    - label: franka
+      node_ranks: 0
+      hardware:
+        type: DualFranka
+        configs:
+          - left_robot_ip: 172.16.0.5
+            right_robot_ip: 172.16.0.2
+            base_camera_serials:
+              - BASE_CAMERA_SERIAL                               # Replace: librealsense device serial (rs.context().devices)
+            base_camera_type: realsense
+            left_camera_serials:
+              - LEFT_CAMERA_SERIAL                               # Replace: e.g. usb-XVisio_..._video-index0
+            left_camera_type: lumos
+            right_camera_serials:
+              - RIGHT_CAMERA_SERIAL                              # Replace: e.g. usb-XVisio_..._video-index0
+            right_camera_type: lumos
+            left_gripper_type: robotiq
+            right_gripper_type: robotiq
+            # Robotiq 2F-85 on RS-485 — use stable /dev/serial/by-id/ paths
+            # so the port survives reboots and USB re-enumeration.
+            left_gripper_connection: LEFT_GRIPPER_CONNECTION     # Replace: /dev/serial/by-id/usb-FTDI_..._DAAIxxxx-if00-port0
+            right_gripper_connection: RIGHT_GRIPPER_CONNECTION   # Replace: /dev/serial/by-id/usb-FTDI_..._DAAIxxxx-if00-port0
+            left_controller_node_rank: 0
+            right_controller_node_rank: 0
+            node_rank: 0
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: null
+    project_name: rlinf
+    experiment_name: "collect-data-spacemouse-dual-franka"
+    logger_backends: ["tensorboard"]
+  num_data_episodes: 20
+  record_task_description: False
+
+env:
+  group_name: "EnvGroup"
+  eval:
+    no_gripper: False
+    ignore_terminations: False
+    auto_reset: False
+    use_spacemouse: True
+    use_gello: False
+    use_gello_joint: False
+    use_pico: False
+
+    # pyspacemouse device indices follow USB enumeration order; if each arm
+    # responds to the wrong mouse, swap these two values.
+    left_spacemouse_device_index: 0
+    right_spacemouse_device_index: 1
+    # Optional: pin each mouse to its USB port via a udev by-path symlink
+    # (stable across reboots; wins over the device index). Identify the
+    # devices first:
+    #   python toolkits/realworld_check/test_spacemouse.py
+    #   python toolkits/realworld_check/test_spacemouse.py --watch 0
+    # left_spacemouse_path: /dev/hidraw/by-path/pci-0000:00:14.0-usb-0:1:1.0
+    # right_spacemouse_path: /dev/hidraw/by-path/pci-0000:00:14.0-usb-0:2:1.0
+
+    # Foot-pedal-driven keyboard wrapper. The 3-key pedal maps to:
+    #   a (pre)  → start a new rec episode at the current pose
+    #   a (rec)  → ABORT current episode (drop buffer, return to pre,
+    #              arm stays where it is — no home reset)
+    #   b (rec)  → bump segment_id by 1 (1 s debounce; sub-task boundary)
+    #   c (rec)  → SUCCESS end (reward=+1, done) → episode saved
+    keyboard_reward_wrapper: "start_end"
+    # Alternative without the keyboard wrapper (same as the single-arm
+    # realworld_collect_data.yaml): delete the line above, then episodes end
+    # automatically when both arms hold target_ee_pose for
+    # success_hold_steps consecutive steps.
+    max_episode_steps: 10000
+    max_steps_per_rollout_epoch: 10000
+
+    override_cfg:
+      enable_camera_player: true
+      max_num_steps: 10000
+      task_description: TASK_DESCRIPTION                      # Replace: prompt for this collection
+      joint_reset_qpos:                                       # Replace: from your dataset's first-frame joint means
+        - [0.0, 0.0, 0.0, -1.9, 0.0, 2.0, 0.0]
+        - [0.0, 0.0, 0.0, -1.9, 0.0, 2.0, 0.0]
+      # Bookkeeping poses (joint-space step does NOT consume these, but
+      # DualFrankaEnv keeps the fields populated for downstream tooling).
+      target_ee_pose:
+        - [0.5, -0.2, 0.4, -3.14, 0.0, 0.0]
+        - [0.5,  0.2, 0.4, -3.14, 0.0, 0.0]
+      reset_ee_pose:
+        - [0.5, -0.2, 0.5, -3.14, 0.0, 0.0]
+        - [0.5,  0.2, 0.5, -3.14, 0.0, 0.0]
+      success_hold_steps: 1
+      # SpaceMouse delta gains: [pos, rot, gripper]. 0.5 rotation gain keeps
+      # teleop from being twitchy.
+      action_scale: [1.0, 0.5, 1.0]
+
+    data_collection:
+      enabled: True
+      # Edit ``save_dir`` here to point successive collect runs at the
+      # same dataset root. Each run's log_path is still per-session
+      # under logs/, so run_embodiment.log stays unique even when
+      # datasets accumulate.
+      save_dir: ${runner.logger.log_path}/collected_data
+      # When true, CollectEpisode seeds its episode counter from shards
+      # already on disk under save_dir and the collector's progress bar
+      # starts from that count. New episodes land in a fresh ``id_{N}``
+      # shard so previously-finalized data is never touched.
+      resume: true
+      export_format: "lerobot"
+      only_success: True
+      robot_type: "dual_FR3"
+      fps: 10

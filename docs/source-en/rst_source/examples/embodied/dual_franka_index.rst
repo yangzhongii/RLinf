@@ -32,6 +32,12 @@ supervised fine-tuning, deployment, and DAgger training.
 
       Collect dual-arm PICO data and run online human-gated DAgger.
 
+   .. grid-item-card:: SpaceMouse Collection
+      :link: dual_franka_spacemouse
+      :link-type: doc
+
+      Collect dual-arm demos with two SpaceMice.
+
 .. toctree::
    :hidden:
    :maxdepth: 1
@@ -39,3 +45,4 @@ supervised fine-tuning, deployment, and DAgger training.
    Collect-SFT-Deploy <dual_franka>
    Collect-SFT-Deploy (RLinf-pytorch) <dual_franka_openpi_pytorch>
    HG-DAgger via VR <dual_franka_pico_dagger>
+   SpaceMouse Collection <dual_franka_spacemouse>

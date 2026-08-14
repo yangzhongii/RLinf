@@ -23,6 +23,9 @@ import gymnasium as gym
 from rlinf.envs.realworld.common.wrappers.dual_gello_joint_intervention import (
     DualGelloJointIntervention,
 )
+from rlinf.envs.realworld.common.wrappers.dual_spacemouse_intervention import (
+    DualSpacemouseIntervention,
+)
 from rlinf.envs.realworld.common.wrappers.euler_obs import Quat2EulerWrapper
 from rlinf.envs.realworld.common.wrappers.gello_intervention import (
     GelloIntervention,
@@ -165,13 +168,19 @@ def apply_dual_franka_joint_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gy
 
     use_pico = cfg.get("use_pico", False)
     use_gello_joint = cfg.get("use_gello_joint", False)
-    if cfg.get("use_spacemouse", False) or cfg.get("use_gello", False):
+    use_spacemouse = cfg.get("use_spacemouse", False)
+    if cfg.get("use_gello", False):
         raise ValueError(
-            "Dual-arm Franka envs do not support use_spacemouse=True or "
-            "use_gello=True. Use use_gello_joint=True for GELLO-joint teleop "
-            "or use_pico=True for dual-arm PICO teleop."
+            "Dual-arm Franka envs do not support use_gello=True. Use "
+            "use_gello_joint=True for GELLO-joint teleop, use_pico=True for "
+            "dual-arm PICO teleop, or use_spacemouse=True for dual-arm "
+            "SpaceMouse teleop."
         )
-    _validate_teleop_mode(use_gello_joint=use_gello_joint, use_pico=use_pico)
+    _validate_teleop_mode(
+        use_spacemouse=use_spacemouse,
+        use_gello_joint=use_gello_joint,
+        use_pico=use_pico,
+    )
 
     if not config.is_dummy and use_gello_joint:
         left_port = cfg.get("left_gello_port", None)
@@ -203,6 +212,21 @@ def apply_dual_franka_joint_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gy
             env,
             gripper_enabled=True,
             **pico_cfg,
+        )
+
+    if not config.is_dummy and use_spacemouse:
+        if getattr(env.unwrapped, "PER_ARM_ACTION_DIM", None) != 10:
+            raise ValueError(
+                "use_spacemouse=True for dual-arm Franka is implemented for "
+                "DualFrankaTcpEnv-v1 only. Use env/realworld_dual_franka_tcp_rot6d."
+            )
+        env = DualSpacemouseIntervention(
+            env,
+            gripper_enabled=True,
+            left_device_index=cfg.get("left_spacemouse_device_index", 0),
+            right_device_index=cfg.get("right_spacemouse_device_index", 1),
+            left_device_path=cfg.get("left_spacemouse_path", None),
+            right_device_path=cfg.get("right_spacemouse_path", None),
         )
 
     env = _apply_keyboard_wrapper(env, cfg.get("keyboard_reward_wrapper", None))

@@ -32,6 +32,12 @@ Dual-Arm Franka
 
       使用 PICO 进行双臂数据采集与 DAgger 训练。
 
+   .. grid-item-card:: SpaceMouse Collection
+      :link: dual_franka_spacemouse
+      :link-type: doc
+
+      使用两个空间鼠标采集双臂示教数据。
+
 .. toctree::
    :hidden:
    :maxdepth: 1
@@ -39,3 +45,4 @@ Dual-Arm Franka
    Collect-SFT-Deploy <dual_franka>
    Collect-SFT-Deploy (RLinf-pytorch) <dual_franka_openpi_pytorch>
    HG-DAgger via VR <dual_franka_pico_dagger>
+   SpaceMouse Collection <dual_franka_spacemouse>

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import threading
+from typing import Optional
 
 import numpy as np
 
@@ -24,10 +25,17 @@ class SpaceMouseExpert:
     a "get_action" method to get the latest action and button state.
     """
 
-    def __init__(self, device_index: int = 0) -> None:
+    def __init__(
+        self, device_index: int = 0, device_path: Optional[str] = None
+    ) -> None:
         import pyspacemouse
 
-        self._device = pyspacemouse.open(device_index=device_index)
+        if device_path is not None:
+            # Open by filesystem path (e.g. a udev /dev/.../by-path symlink)
+            # so two identical SpaceMice stay pinned to their USB ports.
+            self._device = pyspacemouse.open_by_path(device_path)
+        else:
+            self._device = pyspacemouse.open(device_index=device_index)
 
         self.state_lock = threading.Lock()
         self.latest_data: dict = {"action": np.zeros(6), "buttons": [0, 0]}

@@ -94,7 +94,7 @@ echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/robotpkg.asc] http://robotpkg.
 sudo apt-get update
 sudo apt-get install -y robotpkg-simde=0.8.0 
 sudo apt-get install -y robotpkg-casadi=3.6.7
-sudo apt-get install -y robotpkg-pinocchio
+sudo apt-get install -y robotpkg-pinocchio robotpkg-console-bridge
 
 # franka_ros dependencies
 sudo apt-get install -y --no-install-recommends \

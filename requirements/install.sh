@@ -95,10 +95,13 @@ USE_MIRRORS=0
 GITHUB_PREFIX=""
 NO_ROOT=0
 NO_INSTALL_RLINF_CMD="--no-install-project"
+# Whether --left-ip/--right-ip were passed on the command line (they are only
+# valid with --env franka-franky_in_one).
+USED_IP_FLAGS=0
 SUPPORTED_TARGETS=("embodied" "agentic" "docs")
 SUPPORTED_ENGINES=("sglang" "vllm")
 SUPPORTED_MODELS=("openvla" "openvla-oft" "openpi" "gr00t" "gr00t_n1d6" "gr00t_n1d7" "dexbotic" "starvla" "lingbotvla" "dreamzero" "qwen3_vl" "abot_m0" "molmoact2" "evo1")
-SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "robocasa365" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "dummy" "polaris")
+SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "robocasa365" "franka" "franka-dexhand" "franka-franky" "franka-franky_in_one" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "dummy" "polaris")
 
 #=======================Utility Functions=======================
 
@@ -154,6 +157,12 @@ Common options:
                            (Ascend/MUSA).
     --no-apex              Skip apex install. Useful when Megatron-LM is not needed and
                            CUDA toolchain mismatch prevents download apex of the right version.
+    --left-ip <ip>         Franka FCI IP of the left arm. Only valid with
+                           --env franka-franky_in_one (auto-detects the robot
+                           system version).
+    --right-ip <ip>        Franka FCI IP of the right arm. Only valid with
+                           --env franka-franky_in_one (auto-detects the robot
+                           system version).
     --install-rlinf        Install RLinf itself into the python.
 EOF
 }
@@ -278,6 +287,24 @@ parse_args() {
             --no-apex)
                 DISABLE_APEX=1
                 shift
+                ;;
+            --left-ip)
+                if [ -z "${2:-}" ]; then
+                    echo "--left-ip requires an IP address argument." >&2
+                    exit 1
+                fi
+                LEFT_ROBOT_IP="${2:-}"
+                USED_IP_FLAGS=1
+                shift 2
+                ;;
+            --right-ip)
+                if [ -z "${2:-}" ]; then
+                    echo "--right-ip requires an IP address argument." >&2
+                    exit 1
+                fi
+                RIGHT_ROBOT_IP="${2:-}"
+                USED_IP_FLAGS=1
+                shift 2
                 ;;
             --*)
                 echo "Unknown option: $1" >&2
@@ -2213,8 +2240,17 @@ install_qwen3_vl_model() {
 }
 
 install_lerobot() {
+    # Run outside the repo so uv does not apply pyproject.toml's
+    # [tool.uv] override-dependencies (patched by apply_torch_override with
+    # platform-local pins such as torchvision==X.Y.Z+cu128) to lerobot's own
+    # pins; the local segment only exists on the torch wheel index, so the
+    # resolution would otherwise fail. The active venv is still found via
+    # VIRTUAL_ENV, and installed torch/torchvision already satisfy lerobot's
+    # base pins.
+    pushd /tmp >/dev/null
     env -u UV_TORCH_BACKEND uv pip install \
         "git+${GITHUB_PREFIX}https://github.com/huggingface/lerobot.git@${LEROBOT_COMMIT}"
+    popd >/dev/null
 }
 
 install_franka_realworld_env() {
@@ -2254,6 +2290,9 @@ install_env_only() {
                 bash $SCRIPT_DIR/embodied/franky_install.sh
             fi
             install_franka_franky_env
+            ;;
+        franka-franky_in_one)
+            install_franka_franky_in_one_env
             ;;
         xsquare_turtle2)
             uv sync --extra xsquare_turtle2 --active "${PLATFORM_UV_SYNC_ARGS[@]}" $NO_INSTALL_RLINF_CMD
@@ -2631,6 +2670,267 @@ install_franka_franky_env() {
     # re-resolve them breaks Ray pickling across nodes.
     uv pip install --reinstall-package franky-control --no-deps "$FRANKY_WHEEL"
     install_lerobot
+}
+
+# Build one franka catkin workspace (libfranka + franka_ros +
+# serl_franka_controllers) at $1. Used by the franka-franky_in_one install to
+# create one workspace per arm. Version-checked clone/rebuild makes re-runs
+# cheap: libfranka is re-cloned only when the tag differs from
+# LIBFRANKA_VERSION and rebuilt only when the build dir is missing, empty, or
+# built from another version. LIBFRANKA_VERSION / FRANKA_ROS_VERSION env
+# overrides apply. Does NOT touch the venv activate script; callers append
+# their own exports.
+_build_franka_catkin_ws() {
+    local ws_dir="$1"
+    set +euo pipefail
+    source /opt/ros/noetic/setup.bash
+    set -euo pipefail
+    local ROS_CATKIN_PATH
+    ROS_CATKIN_PATH=$(realpath "$ws_dir")
+    LIBFRANKA_VERSION=${LIBFRANKA_VERSION:-0.19.0}
+    FRANKA_ROS_VERSION=${FRANKA_ROS_VERSION:-0.10.0}
+
+    mkdir -p "$ROS_CATKIN_PATH/src"
+
+    # Clone necessary repositories
+    pushd "$ROS_CATKIN_PATH/src"
+    if [ ! -d "$ROS_CATKIN_PATH/src/serl_franka_controllers" ]; then
+        git clone https://github.com/rail-berkeley/serl_franka_controllers
+    fi
+    popd >/dev/null
+
+    # --- libfranka: ensure correct version (subshell to avoid CWD issues) ---
+    local _current
+    if [ -d "$ROS_CATKIN_PATH/libfranka" ]; then
+        _current=$(cd "$ROS_CATKIN_PATH/libfranka" && git describe --tags --exact-match HEAD 2>/dev/null || echo "unknown")
+        if [ "$_current" != "$LIBFRANKA_VERSION" ]; then
+            echo "libfranka: ${_current} -> ${LIBFRANKA_VERSION}, re-cloning..."
+            rm -rf "$ROS_CATKIN_PATH/libfranka"
+        fi
+    fi
+    if [ ! -d "$ROS_CATKIN_PATH/libfranka" ]; then
+        git clone -b "$LIBFRANKA_VERSION" --recurse-submodules \
+            https://github.com/frankaemika/libfranka "$ROS_CATKIN_PATH/libfranka"
+    fi
+
+    # --- franka_ros: ensure correct version ---
+    if [ -d "$ROS_CATKIN_PATH/src/franka_ros" ]; then
+        _current=$(cd "$ROS_CATKIN_PATH/src/franka_ros" && git describe --tags --exact-match HEAD 2>/dev/null || echo "unknown")
+        if [ "$_current" != "$FRANKA_ROS_VERSION" ]; then
+            echo "franka_ros: ${_current} -> ${FRANKA_ROS_VERSION}, re-cloning..."
+            rm -rf "$ROS_CATKIN_PATH/src/franka_ros"
+        fi
+    fi
+    if [ ! -d "$ROS_CATKIN_PATH/src/franka_ros" ]; then
+        git clone -b "$FRANKA_ROS_VERSION" --recurse-submodules \
+            https://github.com/RLinf/franka_ros "$ROS_CATKIN_PATH/src/franka_ros"
+    fi
+
+    # Build
+    pushd "$ROS_CATKIN_PATH"
+
+    # --- libfranka: rebuild only if .so is missing or version changed ---
+    local _need_libfranka_rebuild=true
+    local _built_version=""
+    if [ -f "$ROS_CATKIN_PATH/libfranka/build/CMakeCache.txt" ]; then
+        _built_version=$(grep '^CMAKE_PROJECT_VERSION:STATIC=' "$ROS_CATKIN_PATH/libfranka/build/CMakeCache.txt" | cut -d= -f2)
+        if [ "$_built_version" = "$LIBFRANKA_VERSION" ] && [ -f "$ROS_CATKIN_PATH/libfranka/build/libfranka.so" ]; then
+            echo "libfranka ${LIBFRANKA_VERSION} already built, skipping."
+            _need_libfranka_rebuild=false
+        else
+            echo "libfranka: built=${_built_version:-none} target=${LIBFRANKA_VERSION}, rebuilding..."
+            rm -rf "$ROS_CATKIN_PATH/libfranka/build"
+        fi
+    else
+        echo "libfranka ${LIBFRANKA_VERSION}: building..."
+    fi
+
+    if $_need_libfranka_rebuild; then
+        mkdir -p "$ROS_CATKIN_PATH/libfranka/build"
+        pushd "$ROS_CATKIN_PATH/libfranka/build" >/dev/null
+        # Pinocchio's cmake config references console_bridge::console_bridge
+        # but never calls find_dependency for it. Inject it before pinocchio
+        # (idempotent: skip if the line is already present).
+        if ! grep -q 'find_package(console_bridge QUIET)' "$ROS_CATKIN_PATH/libfranka/CMakeLists.txt"; then
+            sed -i '/find_package(pinocchio REQUIRED)/i find_package(console_bridge QUIET)' "$ROS_CATKIN_PATH/libfranka/CMakeLists.txt"
+        fi
+        cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_PREFIX_PATH=/opt/openrobots -DBUILD_TESTS=OFF ..
+        make -j$(nproc)
+        popd >/dev/null
+    fi
+    export LD_LIBRARY_PATH=$ROS_CATKIN_PATH/libfranka/build:/opt/openrobots/lib:$LD_LIBRARY_PATH
+    export CMAKE_PREFIX_PATH=$ROS_CATKIN_PATH/libfranka/build:$CMAKE_PREFIX_PATH
+
+    # Then franka_ros
+    catkin_make -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DFranka_DIR:PATH=$ROS_CATKIN_PATH/libfranka/build
+
+    # Finally serl_franka_controllers
+    catkin_make -DCMAKE_CXX_STANDARD=17 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 --pkg serl_franka_controllers
+    popd >/dev/null
+}
+
+# --- franka system-version auto-detection (franka-franky_in_one only) ---
+# The robot system version (shown on the Desk page) decides which libfranka
+# protocol to install, per the official compatibility matrix: system
+# >= 5.9.0 speaks server protocol 10 (libfranka >= 0.18, e.g. 0.19.0); older
+# systems speak protocol 9 (libfranka 0.15.0 covers the 5.7.2 - 5.9.0 range).
+# An explicit LIBFRANKA_VERSION env override always wins.
+
+# version_ge $1 $2: true when dotted version $1 >= $2.
+version_ge() {
+    [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]
+}
+
+# Query one robot's system version through the Desk API (or its login page).
+# Prints the version on success (e.g. "7.0.5"), returns 1 when the robot is
+# unreachable or none of the known API shapes match.
+detect_franka_system_version() {
+    local ip="$1"
+    local url body ver
+    for url in \
+        "https://$ip/desk/api/system_info" \
+        "http://$ip/desk/api/system_info" \
+        "https://$ip/api/system_info" \
+        "http://$ip/api/system_info" \
+        "https://$ip/desk/api/robot" \
+        "http://$ip/desk/api/robot" \
+        "https://$ip/api/robot" \
+        "http://$ip/api/robot" \
+        "https://$ip/desk" \
+        "http://$ip/desk"; do
+        body=$(curl -sk --max-time 3 "$url" 2>/dev/null) || continue
+        # JSON fields ("system_version" / "systemVersion"), then any
+        # "System version X.Y.Z"-style text on the Desk login page.
+        ver=$(printf '%s' "$body" | grep -oE '"(system_version|systemVersion)"[[:space:]]*:[[:space:]]*"[0-9]+(\.[0-9]+)*"' | grep -oE '[0-9]+(\.[0-9]+)*' | head -n1)
+        if [ -z "$ver" ]; then
+            ver=$(printf '%s' "$body" | grep -oiE 'system[ _]?version[^0-9]{0,20}[0-9]+\.[0-9]+(\.[0-9]+)?' | grep -oE '[0-9]+(\.[0-9]+)*' | head -n1)
+        fi
+        if [ -n "$ver" ]; then
+            echo "$ver"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Map a robot system version to the libfranka version to install.
+franka_libfranka_for_system_version() {
+    local ver="$1"
+    if version_ge "$ver" "5.9.0"; then
+        echo "0.19.0"
+    else
+        if ! version_ge "$ver" "5.7.2"; then
+            echo "[install.sh] WARNING: system version ${ver} is below the tested 5.7.2 range; picking libfranka 0.15.0 (protocol 9). Verify against the Franka compatibility matrix." >&2
+        fi
+        echo "0.15.0"
+    fi
+}
+
+# Resolve LIBFRANKA_VERSION for the dual-arm install: an explicit
+# LIBFRANKA_VERSION env override wins; otherwise probe the robots passed via
+# --left-ip / --right-ip (also honored as LEFT_ROBOT_IP / RIGHT_ROBOT_IP env
+# vars) and pick the version matching their system version.
+resolve_franka_libfranka_version() {
+    if [ -n "${LIBFRANKA_VERSION:-}" ]; then
+        return 0
+    fi
+    local ips=()
+    if [ -n "${LEFT_ROBOT_IP:-}" ]; then ips+=("$LEFT_ROBOT_IP"); fi
+    if [ -n "${RIGHT_ROBOT_IP:-}" ]; then ips+=("$RIGHT_ROBOT_IP"); fi
+    if [ ${#ips[@]} -eq 0 ]; then
+        LIBFRANKA_VERSION="0.19.0"
+        echo "[install.sh] franka-franky_in_one: no robot IPs given (--left-ip/--right-ip); skipping system-version detection, defaulting to libfranka ${LIBFRANKA_VERSION}." >&2
+        return 0
+    fi
+
+    local probe_ip="" ver=""
+    for ip in "${ips[@]}"; do
+        if ver=$(detect_franka_system_version "$ip"); then
+            probe_ip="$ip"
+            break
+        fi
+    done
+
+    if [ -z "$ver" ]; then
+        LIBFRANKA_VERSION="0.19.0"
+        echo "[install.sh] franka-franky_in_one: no robot system version detected from ${ips[*]} (Desk API unreachable or unknown API shape); defaulting to libfranka ${LIBFRANKA_VERSION}. Export LIBFRANKA_VERSION to override, or report the output of: curl -sk https://${ips[0]}/desk/api/system_info" >&2
+        return 0
+    fi
+
+    LIBFRANKA_VERSION=$(franka_libfranka_for_system_version "$ver")
+    echo "[install.sh] franka-franky_in_one: robot at ${probe_ip} reports system version ${ver}; installing libfranka ${LIBFRANKA_VERSION}."
+
+    # Both arms must speak the same server protocol.
+    local other_ip other_ver other_mapped
+    for other_ip in "${ips[@]}"; do
+        [ "$other_ip" = "$probe_ip" ] && continue
+        if other_ver=$(detect_franka_system_version "$other_ip"); then
+            other_mapped=$(franka_libfranka_for_system_version "$other_ver")
+            if [ "$other_mapped" != "$LIBFRANKA_VERSION" ]; then
+                echo "[install.sh] WARNING: robots disagree on the franka protocol: ${probe_ip}=${ver} (libfranka ${LIBFRANKA_VERSION}) vs ${other_ip}=${other_ver} (libfranka ${other_mapped}). Update both robots to the same system version, or set LIBFRANKA_VERSION explicitly." >&2
+            fi
+        fi
+    done
+}
+
+# franka-franky_in_one: the franka-franky install plus what a single-machine
+# dual-arm workstation needs. Inherits the franka-franky steps verbatim (see
+# the franka-franky case in install_env_only), then builds two catkin
+# workspaces (one per arm) for ROS/serl-based control tooling. The dual-arm
+# runtime itself (DualFrankaEnv) drives both robots through the franky wheel
+# and does not use ROS; set SKIP_ROS=1 to skip the ROS packages and the two
+# workspaces entirely.
+install_franka_franky_in_one_env() {
+    # Auto-detect the robot system version (via the Desk API) and pick the
+    # matching libfranka version from the compatibility matrix; an explicit
+    # LIBFRANKA_VERSION env override wins. The resolved version drives both
+    # the franky wheel and the two catkin workspaces below.
+    resolve_franka_libfranka_version
+    uv sync --extra franka --active "${PLATFORM_UV_SYNC_ARGS[@]}" $NO_INSTALL_RLINF_CMD
+    if [ "$NO_ROOT" -eq 0 ]; then
+        bash $SCRIPT_DIR/embodied/franky_install.sh
+    fi
+    install_franka_franky_env
+    # lerobot depends on opencv-python-headless which overrides opencv-python
+    # and breaks cv2.namedWindow / cv2.imshow.  Force the GUI-enabled package.
+    # Must run after install_lerobot (inside install_franka_franky_env).
+    uv pip install --reinstall opencv-python 2>/dev/null || true
+
+    if [ "$SKIP_ROS" -ne 1 ]; then
+        if [ "$NO_ROOT" -eq 0 ]; then
+            bash $SCRIPT_DIR/embodied/ros_install.sh
+        fi
+        _build_franka_catkin_ws "$VENV_DIR/franka_catkin_ws1"
+        _build_franka_catkin_ws "$VENV_DIR/franka_catkin_ws2"
+
+        local WS1 WS2
+        WS1=$(realpath "$VENV_DIR/franka_catkin_ws1")
+        WS2=$(realpath "$VENV_DIR/franka_catkin_ws2")
+        # Both workspaces carry the same franka_ros/serl package names;
+        # sourcing ws2 last lets it shadow ws1 in ROS_PACKAGE_PATH. Source
+        # per-workspace at launch time when a ROS node must target a
+        # specific arm.
+        echo "export LD_LIBRARY_PATH=$WS1/libfranka/build:$WS2/libfranka/build:/opt/openrobots/lib:\$LD_LIBRARY_PATH" >> "$VENV_DIR/bin/activate"
+        echo "export CMAKE_PREFIX_PATH=$WS1/libfranka/build:$WS2/libfranka/build:\$CMAKE_PREFIX_PATH" >> "$VENV_DIR/bin/activate"
+        echo "source /opt/ros/noetic/setup.bash" >> "$VENV_DIR/bin/activate"
+        echo "source $WS1/devel/setup.bash" >> "$VENV_DIR/bin/activate"
+        echo "source $WS2/devel/setup.bash" >> "$VENV_DIR/bin/activate"
+
+        # The two workspaces are identical builds; record which robot each
+        # one belongs to (ws1 = left arm, ws2 = right arm) so they stay
+        # distinguishable after install.
+        local left_ip right_ip
+        left_ip="${LEFT_ROBOT_IP:-<unset>}"
+        right_ip="${RIGHT_ROBOT_IP:-<unset>}"
+        cat > "$VENV_DIR/franka_ws_map.txt" <<EOF
+franka_catkin_ws1 = left arm  @ ${left_ip}
+franka_catkin_ws2 = right arm @ ${right_ip}
+EOF
+        echo "Franka workspace map (see $VENV_DIR/franka_ws_map.txt):"
+        cat "$VENV_DIR/franka_ws_map.txt"
+    fi
 }
 
 install_franka_dexhand_deps() {
@@ -3014,6 +3314,10 @@ main() {
                 fi
             elif [ "$MODEL" != "dreamzero" ]; then
                 echo "--env must be specified when target=embodied." >&2
+                exit 1
+            fi
+            if [ "$USED_IP_FLAGS" -eq 1 ] && [ "$ENV_NAME" != "franka-franky_in_one" ]; then
+                echo "--left-ip/--right-ip can only be used with --env franka-franky_in_one." >&2
                 exit 1
             fi
 
